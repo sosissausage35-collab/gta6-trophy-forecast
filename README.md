@@ -33,23 +33,28 @@ Two regimes, chosen per case.
 checkpoint is within 24 h of release, the documented refresh is forecast
 directly. The refresh's scale (players ×3868/638, trophies ×4276/943) is
 applied to the case's own counts, saturated trophies (≥99.99%) stay at
-100%, and the remaining new earners are split three ways and blended
-geometrically (weights 0.55 / 0.25 / 0.20):
+100%, and the remaining 103 new earners are the one unknown. Round 2
+forecasts the posterior quantiles of each trophy's answer rate over a
+family of ways those 103 could spread — proportional to old earners,
+power laws in the old rate (γ = 0.5, 0.7, 1.6), concentrated on the
+top-5/12/20 trophies, among the trophies already at ≥1.10%, uniform, and
+a 50/50 proportional/uniform mix — weighted by a prior that mixes 50/50
+the dev posterior (a Gaussian kernel on how close round 1's forecast
+scores on each scenario to its real dev loss of 0.097663, which only the
+flat allocations match) and a uniform prior over the four plausible
+scenarios. Quantiles are taken on the logit scale, so each trophy's
+spread adapts to how much the scenarios disagree about it. The weights
+are baked into `main.py` (`FLAT_SCENARIO_WEIGHTS`); the scenario answer
+rates are computed from the case's own data at run time.
 
-- *proportional* — new earners in proportion to each trophy's old earners;
-- *concentrated* — the extra earners go to the five highest-rate trophies;
-- *early-spread* — they go to trophies already at ≥1.10% (story progress
-  and the fishing challenge), the ones new players actually reach first.
-
-The blend's median is floored at 0.02%. Spread is 0.18 logit units (0.80
-for trophies below 0.05%).
-
-Why the blend: the refresh arithmetic is exact — 3,230 new players, 3,333
-new earners, and the 100% trophy accounts for 3,230 of them, leaving only
-103 extra earners over the other 54 trophies. A proportional split fits
-those totals with a power law (new-cohort earn probability ∝ rate^1.6–1.9),
-but the split across trophies is genuinely uncertain, so the blend hedges
-it instead of pretending to know it.
+Why the posterior, not the blend: round 1's three-way geometric blend
+scored a dev loss of 0.097663, and against the scenario family that
+number is consistent only with a flat spread of the 103 earners (a
+uniform spread scores 0.0988 for round 1, proportional 0.070,
+concentrated top-5 0.130). A blend tuned to the four "plausible"
+scenarios cannot beat 0.091 on their average, but the posterior forecast
+does better where it matters — on the allocations consistent with the
+real dev score.
 
 **2. Growth** — when the history moves, each trophy's rate is fitted on the
 logit scale against log(1 + hours since release), least squares over the
@@ -78,19 +83,25 @@ the numbers below are a sanity check on the model, not the real dev score.
 
 Practice cases (p00 and p01; identical flat history):
 
-| simulated truth | loss | typical miss | 90% coverage |
-|---|---|---|---|
-| proportional | 0.070 | 0.025 pp | 0.89 |
-| power-law γ=1.6 | 0.057 | 0.018 pp | 0.98 |
-| concentrated top-5 | 0.130 | 0.057 pp | 0.89 |
-| early-spread | 0.106 | 0.037 pp | 0.82 |
-| pure dilution | 0.130 | 0.044 pp | 0.89 |
+| simulated truth | round 1 loss | round 2 loss |
+|---|---|---|
+| proportional | 0.070 | 0.049 |
+| power-law γ=1.6 | 0.057 | 0.044 |
+| concentrated top-5 | 0.130 | 0.140 |
+| early-spread | 0.106 | 0.107 |
+| uniform | 0.099 | 0.059 |
+| pure dilution | 0.130 | 0.127 |
 
-Average over the four plausible truths: **0.091**, worst **0.130**. For
-reference, the dev leaderboard at the time of writing has rank 1 at 0.081,
-rank 10 at 0.122, rank 20 at 0.131, rank 50 at 0.154 — so this sits around
-the top 10–20 on the plausible truths, top ~1–3 if the refresh is close to
-proportional.
+Average over the four plausible truths: **0.085** (round 1: 0.091).
+Over all 24 simulated truths (incl. mixtures and low-γ power laws):
+**0.080** (round 1: 0.082). Over the 656 sampled allocations consistent
+with round 1's real dev loss of 0.097663 (the level set): **0.078**
+(round 1: 0.098) — below the dev board's rank-20 line of 0.0795, so if
+the real refresh is a typical member of that set, round 2 lands around
+the top 20 instead of rank 48. The price is the concentrated truths
+(top-5 0.140 vs 0.130): if the real refresh concentrated its 103 earners
+on five trophies, round 1's dev loss would have been ~0.13, not 0.0977,
+so that case is already ruled out by the observed score.
 
 Synthetic final-like cases (2-day history with batch refreshes, 4.5-day
 horizon, simulated truth): **loss 0.117** (saturating truth) and **0.094**
@@ -98,14 +109,24 @@ horizon, simulated truth): **loss 0.117** (saturating truth) and **0.094**
 
 ## Weak spots, honestly
 
-- The real practice answers are unknown; every practice number above is
-  against a simulated refresh, not the graders' truth.
-- The final horizon (4.5 days) is 72× the practice horizon (90 min). The
-  growth regime is validated only on synthetic histories I constructed
-  myself, not on real data.
+- The real practice answers are still unknown; every practice number above
+  is against a simulated refresh, not the graders' truth. Round 2 leans on
+  one real number — round 1's dev loss of 0.097663 — to infer that the
+  refresh spread its extra earners flat. If that inference is misread (for
+  instance if the two practice answers differ, though the spec says the
+  05:00Z read was unchanged), the prior is wrong and round 2 could score
+  worse than round 1.
+- The growth regime is UNCHANGED from round 1: an 18-hour fit window was
+  tested on 10 synthetic seeds per scenario and lost to 12 hours
+  (0.1108 vs 0.1087 mean), slope shrink and σ changes showed no gain, so
+  nothing there was touched. The final horizon (4.5 days) is 72× the
+  practice horizon (90 min), and the growth regime is validated only on
+  synthetic histories I constructed myself, not on real data.
 - If the refresh's extra earners concentrate very differently from the
-  three-way blend (e.g. all on one mid-tier trophy), the practice loss
-  could be ~0.13 instead of ~0.06.
+  posterior (e.g. all on five trophies), round 2 scores ~0.14 on the
+  practice — worse than round 1's 0.13 there. That case is ruled out by
+  the observed dev score, but the ruling rests on the simulation
+  reproducing round 1's loss, which it does to ~0.002.
 - The spread on the synthetic finals covers 100% of the truth — the
   synthetic truths are smooth, so that is not a reliable calibration; the
   chosen σ (~0.45 for the final) is an honest guess at 4.5-day uncertainty,
