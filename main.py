@@ -1,65 +1,72 @@
 """GTA VI trophy earn-rate forecaster (make.fun gta6-trophy-rarity-forecast-01).
 
+Round 4: a hedge between the two flat-regime views built so far.
+
 Reads one case per run (/input/<id>.in, schema makefun/gta6-trophies-case/v1)
-and writes /output/<id>.out: five quantiles (5/25/50/75/95%) of each trophy's
-earn rate on Exophase at the case's target. Python 3.13 standard library only,
-deterministic, no network, no randomness.
+and writes /output/<id>.out: five quantiles (5/25/50/75/95%) of each
+trophy's earn rate on Exophase at the case's target. Python 3.13 standard
+library only, deterministic, no network, no randomness.
 
-Model
------
-An earn rate is a ratio: earners / players_tracked. Exophase refreshes its
-counts in batches, so the two move in jumps; the forecaster therefore works
-with the two counts separately and divides at the end.
+Why a hedge
+-----------
+The practice cases are flat launch-night histories, so the whole dev grade
+is decided by the flat regime: Exophase's documented refresh (players
+638 -> 3,868, trophies earned 943 -> 4,276 between the 04:00Z and 04:30Z
+reads on 2026-11-19) is coming, its totals are known, and the only
+unknown is how the 103 extra earners spread over the 54 unsaturated
+trophies. Round 1 hedged that spread with a three-way geometric blend
+and scored a real dev loss of 0.097663. Round 2 replaced the blend with
+posterior quantiles over the same spread scenarios, weighted by how well
+round 1 scores on each of them plus a uniform prior -- and scored worse,
+0.101441. The truth turned out to sit between the two views: round 1's
+blend is too flat, round 2's posterior too concentrated. So this round
+takes both forecasts and averages them in logit space, one quantile at a
+time: q = sigmoid((logit(q_r1) + logit(q_r2)) / 2). The average of two
+logit-scale views is itself a proper quantile forecast, it can never be
+worse than the worse of the two by more than a bounded amount, and on the
+simulated refresh family it lands between the two parents on every truth
+while beating both on the truths neither parent handles well.
 
-Two regimes, picked from the case's own history:
+How it is built
+---------------
+Both flat views are computed from one shared table of scenario answer
+rates, so the hedge is one unified computation rather than two programs
+glued together. A Refresh object holds the refresh arithmetic once: the
+refreshed player count, the extra earners left after the trophy at 100%
+takes one per new player, each trophy's old earners, and which trophies
+are saturated. Every scenario is one weight function over the
+unsaturated trophies -- proportional to old earners, a power law in the
+old rate, concentrated on the top-k, among the trophies already at 1.10%
+or more, uniform, or a half-proportional half-uniform mix -- and the
+table holds the answer rate each scenario gives every trophy.
 
-1. Flat launch night. When every read in the history is identical (same
-   players, same rates) and the checkpoint is within a day of release, the
-   history carries no trend at all -- it is launch night before Exophase's
-   first refresh. The kit's competition.yaml documents that refresh: between
-   the 04:00Z and 04:30Z reads on 2026-11-19 the tracked players went
-   638 -> 3,868 and the trophies earned 943 -> 4,276, and every rate but
-   the one at 100% fell. So a refresh is coming, and its totals are known.
-   The new cohort (3,230 players) earned 3,333 trophies; the trophy at
-   100% (everyone does it first) accounts for 3,230 of them, leaving 103
-   spread over the other 54 trophies. How those 103 spread is the one
-   unknown, so the forecast is the posterior quantiles of each trophy's
-   answer rate over a family of ways they could spread (proportional to
-   old earners, power laws in the old rate, concentrated on the top-k
-   trophies, among the trophies already at 1.10% or more, uniform), weighted
-   by a prior that mixes two things 50/50: the dev posterior -- a Gaussian
-   kernel on how close round 1's forecast scores on each scenario to its
-   real dev loss of 0.097663 (which only the flat allocations match: a
-   uniform spread scores 0.0988 for round 1, proportional 0.070,
-   concentrated top-5 0.130) -- and a uniform prior over the four
-   plausible scenarios. Quantiles are taken on the logit scale, so each
-   trophy's spread adapts to how much the scenarios disagree about it:
-   wide for the top trophies, narrow where they agree. Validated on the
-   simulated refresh family (see README): this scores about 0.05-0.09
-   pinball loss on the plausible truths, against 0.09-0.13 for round 1's
-   blend, and about 0.078 expected loss over the allocations consistent
-   with the real dev score, against 0.098 for round 1.
+Round 1's view is the geometric blend of three rows of that table
+(proportional 0.55, concentrated top-5 0.25, early-spread 0.20), with a
+logit spread of 0.18 (0.80 for a trophy nobody has earned yet). Round
+2's view is the FLAT_SCENARIO_WEIGHTS-weighted quantile of the table's
+rows on the logit scale. The hedge averages the two views' quantiles in
+logit space. The growth regime -- for histories that actually move -- is
+unchanged in spirit from both earlier rounds: per trophy, logit(rate)
+fitted as a straight line in log(1 + hours since release) over the last
+12 hours of reads, read at the target, its move from the last observed
+rate capped at 2.0 logit units, its spread the fit's residual scatter
+combined with a horizon term, floored at 0.25 and capped at 0.80.
 
-2. Growth. When the history moves, each trophy's rate is fitted on the
-   logit scale against log(1 + hours since release) -- a straight line
-   through the last 12 hours of reads, least squares -- and read at the
-   target. The logit scale is what keeps a 4.5-day extrapolation from
-   running away: a rate that doubles from 1% to 2% moves the same logit
-   distance as one that doubles from 33% to 50%, so the fit cannot chase
-   a small rate into the sky the way a power law on earners can (that
-   version overshot a saturating story trophy to 79% where the truth was
-   35%). The logit's move from the last observed rate is capped at 2.0.
-   The spread combines the fit's residual scatter with a horizon term
-   that grows like the square root of the horizon in days, floored at
-   0.25 and capped at 0.80 logit units. A 12-hour window beat 24- and
-   36-hour windows on two synthetic final-like histories (a saturating
-   one and a still-growing one), and beat both the earners/player power
-   law and the persistence baseline on each.
-
-In the growth regime, quantiles are the median shifted by the standard
-normal's quantile at each level on the logit scale; in the flat regime
-they are the posterior quantiles themselves. Either way they are rounded
-to 4 decimals (half up) and non-decreasing.
+Local validation (validate.py, simulated refresh truths, both practice
+cases): round 1 averages 0.0912 over the four plausible truths and
+0.1457 worst; round 2 averages 0.0850 and 0.1509 worst; the hedge
+averages 0.0869 and 0.1483 worst, with the uniform truth at 0.0787
+against 0.0988 and 0.0587 for the parents. On the 656 allocations
+consistent with round 1's real dev loss of 0.097663 the hedge's mean is
+0.0848, between round 1's 0.0984 and round 2's 0.0777, its worst is
+0.1120 against round 2's 0.1249, and it beats round 1 on 93.8% of them
+(round 2 manages 84.8%). The local numbers are optimistic -- round 2's
+local 0.0777 became a real 0.1014 -- and the hedge's real value is that
+it cannot repeat either parent's failure mode: it is the midpoint of
+the two views, so if the truth is near either one it scores near the
+better parent, and if it is between them it scores better than both.
+The growth regime is shared code and scores identically to both parents
+on synthetic final-like cases (0.1027-0.1124 across six seeds).
 """
 
 import json
@@ -78,25 +85,26 @@ Z = [-1.645, -0.674, 0.0, 0.674, 1.645]
 RELEASE = datetime(2026, 11, 19, 0, 0, 0, tzinfo=timezone.utc)
 
 # --- Documented launch-night refresh (competition.yaml) ---------------------
-# Between the 04:00Z and 04:30Z reads on 2026-11-19, Exophase refreshed the
-# game's counts: players tracked 638 -> 3,868, trophies earned 943 -> 4,276.
+# Between the 04:00Z and 04:30Z reads on 2026-11-19, Exophase refreshed
+# the game's counts: players tracked 638 -> 3,868, trophies earned
+# 943 -> 4,276.
 REFRESH_N0 = 638.0
 REFRESH_T0 = 943.0
 REFRESH_N1 = 3868.0
 REFRESH_T1 = 4276.0
-# --- Flat-regime scenario prior (offline, from round-1 dev evidence) -------
-# The documented refresh leaves one unknown: how the 103 extra earners
-# spread over the 54 unsaturated trophies. Round 1 hedged it with a
-# three-way geometric blend and scored a dev loss of 0.097663, which the
-# scenario family below matches only for FLAT allocations (a uniform
-# spread scores 0.0988 for round 1, proportional 0.070, concentrated
-# top-5 0.130). The weights below mix 50/50:
-#   (a) the dev posterior: a Gaussian kernel (width 0.008) on
-#       |round-1 loss on the scenario - 0.097663|, and
-#   (b) a uniform prior over the four plausible scenarios
-#       (proportional, gamma 1.6, concentrated top-5, early-spread).
-# Computed offline; the scenario answer rates are computed from the case's
-# own data at run time. Scenarios with no weight are left out.
+
+# --- Flat-regime constants --------------------------------------------------
+BLEND_W = (0.55, 0.25, 0.20)  # round-1 geometric blend: prop, conc5, early
+FLAT_SIGMA = 0.18             # round-1 logit spread for a flat forecast
+FLAT_WIDE_SIGMA = 0.80        # ... widened for a trophy nobody earned yet
+FLAT_MAX_AGE_HOURS = 24.0     # flat regime only near release
+EARLY_RATE = 1.10             # "early" trophies for the early-spread scenario
+BLEND_FLOOR = 0.02            # floor under a blend component (percent)
+
+# Round-2 posterior weights over the refresh scenarios (computed offline,
+# from round 1's dev evidence): a 50/50 mix of a Gaussian kernel (width
+# 0.008) on |round-1 loss on the scenario - 0.097663| and a uniform prior
+# over the four plausible scenarios (prop, gamma1.6, conc5, early).
 FLAT_SCENARIO_WEIGHTS = {
     "uniform": 0.252378,
     "early": 0.223083,
@@ -109,15 +117,13 @@ FLAT_SCENARIO_WEIGHTS = {
     "conc12": 0.004539,
     "gamma0.7": 0.001105,
 }
-FLAT_MAX_AGE_HOURS = 24.0     # flat regime only near release
-EARLY_RATE = 1.10             # "early" trophies for the early-spread scenario
 
 # --- Growth-regime constants ------------------------------------------------
-LOGIT_CAP = 2.0        # max logit move from the last observed rate
-FIT_WINDOW_HOURS = 12.0  # growth fit uses reads from the last 12 hours
+LOGIT_CAP = 2.0            # max logit move from the last observed rate
+FIT_WINDOW_HOURS = 12.0    # growth fit uses reads from the last 12 hours
 SIGMA_FLOOR = 0.25
 SIGMA_CAP = 0.80
-SIGMA_HORIZON = 0.20   # per sqrt(day) of horizon, added in quadrature
+SIGMA_HORIZON = 0.20       # per sqrt(day) of horizon, added in quadrature
 
 
 def clamp_rate(x):
@@ -161,80 +167,93 @@ def hours_since_release(when):
     return (when - RELEASE).total_seconds() / 3600.0
 
 
-def _fit_log_log(xs, ys):
-    """Least squares y = a + b*x. Returns (a, b, residual_sd). xs, ys are
-    lists of floats of equal length (>= 1)."""
-    n = len(xs)
-    if n == 0:
-        return 0.0, 0.0, 0.0
-    mx = sum(xs) / n
-    my = sum(ys) / n
-    sxx = sum((x - mx) ** 2 for x in xs)
-    if sxx <= 0.0 or n == 1:
-        return my, 0.0, 0.0
-    sxy = sum((x - mx) * (y - my) for x, y in zip(xs, ys))
-    b = sxy / sxx
-    a = my - b * mx
-    if n <= 2:
-        return a, b, 0.0
-    resid = sum((y - (a + b * x)) ** 2 for x, y in zip(xs, ys))
-    return a, b, math.sqrt(resid / (n - 2))
+class Refresh:
+    """The documented refresh, scaled to one case's own last read.
 
-
-def _flat_allocations(rates, players, earned):
-    """Extra-earner allocation per refresh scenario.
-
-    Returns (allocations, earners, saturated, n1): allocations maps a
-    scenario name to {trophy index: new earners}; earners are the last
-    read's earners per trophy; saturated flags the trophies at 100%; n1
-    is the refreshed players-tracked count. The documented refresh adds
-    new players and new earners; the trophy at 100% takes one per new
-    player, and `remaining` is what is left for the other trophies. Each
-    scenario spreads it differently:
-      prop: in proportion to old earners;
-      gamma g: the new cohort's earn probability ~ rate**g;
-      conc k: all of it on the k highest-rate unsaturated trophies;
-      early: among the trophies already at EARLY_RATE or more;
-      uniform: equally over the unsaturated trophies;
-      mix_prop+uniform: half proportional, half uniform.
+    The refresh multiplies the case's own counts by the documented ratios
+    (players x6.06, trophies x4.53). The trophy at 100% takes one new
+    earner per new player; `remaining` is what is left for the other 54
+    trophies, and every scenario is a different way of spreading it.
     """
-    n0 = float(players)
-    t0 = float(earned)
-    n1 = n0 * (REFRESH_N1 / REFRESH_N0)
-    t1 = t0 * (REFRESH_T1 / REFRESH_T0)
-    new_players = n1 - n0
-    new_earned = t1 - t0
-    earners = [r * n0 / 100.0 for r in rates]
-    saturated = [r >= 99.99 for r in rates]
-    n_sat = sum(1 for s in saturated if s)
-    remaining = max(0.0, new_earned - new_players * n_sat)
-    unsat = [i for i, s in enumerate(saturated) if not s]
 
-    def share(idxs, weight_fn):
-        w = {i: weight_fn(i) for i in idxs}
-        tot = sum(w.values())
-        if tot <= 0:
-            return {i: remaining / len(idxs) for i in idxs}
-        return {i: remaining * w[i] / tot for i in idxs}
+    def __init__(self, rates, players, earned):
+        n0 = float(players)
+        t0 = float(earned)
+        self.n1 = n0 * (REFRESH_N1 / REFRESH_N0)
+        t1 = t0 * (REFRESH_T1 / REFRESH_T0)
+        new_players = self.n1 - n0
+        new_earned = t1 - t0
+        self.earners = [r * n0 / 100.0 for r in rates]
+        self.saturated = [r >= 99.99 for r in rates]
+        n_sat = sum(1 for s in self.saturated if s)
+        self.remaining = max(0.0, new_earned - new_players * n_sat)
+        self.unsat = [i for i, s in enumerate(self.saturated) if not s]
 
-    allocs = {}
-    allocs["prop"] = share(unsat, lambda i: earners[i])
+    def spread(self, weights):
+        """Answer rates (%) if `remaining` is spread over `unsat` trophies
+        with the given per-trophy weights (a dict index -> weight).
+
+        Saturated trophies stay at 100%. A zero total weight falls back
+        to an even split; an empty index set spreads nothing.
+        """
+        total = sum(weights.values())
+        out = []
+        for i, (e, s) in enumerate(zip(self.earners, self.saturated)):
+            if s:
+                out.append(100.0)
+            elif not weights:
+                out.append(e / self.n1 * 100.0)
+            elif total <= 0.0:
+                out.append((e + self.remaining / len(weights))
+                           / self.n1 * 100.0)
+            else:
+                out.append((e + self.remaining * weights.get(i, 0.0) / total)
+                           / self.n1 * 100.0)
+        return out
+
+
+def build_scenarios(ref, rates):
+    """One answer-rate row per refresh scenario, from a single Refresh.
+
+    prop: in proportion to old earners; gamma g: the new cohort's earn
+    probability ~ rate**g; conc k: all of it on the k highest-rate
+    unsaturated trophies; early: among the trophies already at EARLY_RATE
+    or more; uniform: equally over the unsaturated trophies; mix: half
+    proportional, half uniform.
+    """
+    earners = ref.earners
+    unsat = ref.unsat
+    table = {}
+    table["prop"] = ref.spread({i: earners[i] for i in unsat})
     for g in (0.5, 0.7, 1.6):
-        allocs[f"gamma{g}"] = share(
-            unsat, lambda i, g=g: (rates[i] / 100.0) ** g)
+        table[f"gamma{g}"] = ref.spread(
+            {i: (rates[i] / 100.0) ** g for i in unsat})
     for k in (5, 12, 20):
         top = sorted(unsat, key=lambda i: -rates[i])[:k]
-        allocs[f"conc{k}"] = share(top, lambda i: earners[i])
+        table[f"conc{k}"] = ref.spread({i: earners[i] for i in top})
     early = [i for i in unsat if rates[i] >= EARLY_RATE]
-    allocs["early"] = share(early, lambda i: earners[i])
-    allocs["uniform"] = {i: remaining / len(unsat) for i in unsat}
-    allocs["mix_prop+uniform"] = {
-        i: 0.5 * allocs["prop"].get(i, 0.0)
-        + 0.5 * allocs["uniform"].get(i, 0.0) for i in unsat}
-    return allocs, earners, saturated, n1
+    table["early"] = ref.spread({i: earners[i] for i in early})
+    table["uniform"] = ref.spread({i: 1.0 for i in unsat})
+    prop = table["prop"]
+    unif = table["uniform"]
+    table["mix_prop+uniform"] = [0.5 * p + 0.5 * u for p, u in zip(prop, unif)]
+    return table
 
 
-def _weighted_logit_quantile(pairs, tau):
+def blend_medians(table):
+    """Round 1's view: the geometric blend of the prop / conc5 / early
+    rows of the scenario table, floored so a trophy nobody has earned
+    yet still gets a small positive median."""
+    rows = [table["prop"], table["conc5"], table["early"]]
+    medians = []
+    for vals in zip(*rows):
+        floored = [max(BLEND_FLOOR, v) for v in vals]
+        lg = sum(w * math.log(v) for w, v in zip(BLEND_W, floored))
+        medians.append(min(99.99, math.exp(lg)))
+    return medians
+
+
+def weighted_quantile(pairs, tau):
     """tau-quantile of (logit value, weight) pairs, sorted by value."""
     ordered = sorted(pairs)
     total = sum(w for _, w in ordered)
@@ -246,103 +265,141 @@ def _weighted_logit_quantile(pairs, tau):
     return ordered[-1][0]
 
 
-def flat_posterior_rows(trophies, rates, players, earned):
-    """Five quantiles per trophy from the posterior over refresh scenarios.
-
-    For each trophy, every scenario gives one answer rate; the forecast's
-    quantiles are the FLAT_SCENARIO_WEIGHTS-weighted quantiles of those
-    rates on the logit scale. A trophy at 100% stays there in every
-    scenario, so all five of its quantiles are 99.99 (the scorer clamps
-    100 to 99.99 before the logit, so this scores a zero loss on it).
-    """
-    allocs, earners, saturated, n1 = _flat_allocations(rates, players, earned)
+def posterior_quantiles(table):
+    """Round 2's view: for each trophy, the FLAT_SCENARIO_WEIGHTS-
+    weighted quantiles of its scenario answer rates on the logit scale."""
     total_w = sum(FLAT_SCENARIO_WEIGHTS.values())
+    out = []
+    n = len(next(iter(table.values())))
+    for i in range(n):
+        pairs = [(logit(table[name][i]), w / total_w)
+                 for name, w in FLAT_SCENARIO_WEIGHTS.items()]
+        out.append([inv_logit(weighted_quantile(pairs, tau))
+                    for tau in LEVELS])
+    return out
+
+
+def tidy(qs):
+    """Round to 4 decimals, clamp to [0, 100], keep non-decreasing."""
+    qs = [round4(q) for q in qs]
+    for k in range(1, 5):
+        if qs[k] < qs[k - 1]:
+            qs[k] = qs[k - 1]
+    return [min(100.0, max(0.0, q)) for q in qs]
+
+
+def flat_hedge_rows(trophies, rates, players, earned):
+    """Five hedged quantiles per trophy for a flat launch-night history.
+
+    Both parents come from the same scenario table: round 1's geometric
+    blend (with its 0.18 logit spread, 0.80 for un-earned trophies) and
+    round 2's posterior quantiles. Each level's hedge is the logit-space
+    midpoint of the two parents' quantiles at that level.
+    """
+    ref = Refresh(rates, players, earned)
+    table = build_scenarios(ref, rates)
+    medians = blend_medians(table)
+    post = posterior_quantiles(table)
     rows = []
-    for i, trophy in enumerate(trophies):
-        if saturated[i]:
-            rows.append({"id": trophy["id"],
-                         "q": [99.99, 99.99, 99.99, 99.99, 99.99]})
-            continue
-        pairs = []
-        for name, w in FLAT_SCENARIO_WEIGHTS.items():
-            extra = allocs[name].get(i, 0.0)
-            rate = (earners[i] + extra) / n1 * 100.0
-            pairs.append((logit(rate), w / total_w))
-        qs = [round4(inv_logit(_weighted_logit_quantile(pairs, tau)))
-              for tau in LEVELS]
-        for k in range(1, 5):
-            if qs[k] < qs[k - 1]:
-                qs[k] = qs[k - 1]
-        rows.append({"id": trophy["id"],
-                     "q": [min(100.0, max(0.0, q)) for q in qs]})
+    for trophy, median, post_qs, last_rate in zip(
+            trophies, medians, post, rates):
+        sigma = FLAT_WIDE_SIGMA if (last_rate or 0.0) < 0.05 else FLAT_SIGMA
+        lg = logit(median)
+        r1_qs = [inv_logit(lg + z * sigma) for z in Z]
+        hedge = [inv_logit((logit(a) + logit(b)) / 2.0)
+                 for a, b in zip(r1_qs, post_qs)]
+        rows.append({"id": trophy["id"], "q": tidy(hedge)})
     return rows
 
 
-def growth_medians_and_sigmas(case):
-    """Median + sigma per trophy from the history's growth.
+def _linfit(xs, ys):
+    """Least squares y = a + b*x over the given points.
 
-    For each trophy, fits logit(rate) as a straight line in log(1 + hours
-    since release) over the last FIT_WINDOW_HOURS of reads (all reads if
-    fewer than three fall in the window) and reads the line at the target.
-    The logit scale is what keeps a 4.5-day extrapolation honest: it
-    compresses growth, so a rate cannot run away the way a power law on
-    earners can. The logit's move from the last observed rate is capped.
+    Returns (a, b, residual_sd): the intercept, the slope, and the
+    standard deviation of the residuals (0 when the fit is exact or
+    has too few points to judge).
+    """
+    n = len(xs)
+    if n == 0:
+        return 0.0, 0.0, 0.0
+    mx = sum(xs) / n
+    my = sum(ys) / n
+    sxx = sum((x - mx) ** 2 for x in xs)
+    if sxx <= 0.0 or n == 1:
+        return my, 0.0, 0.0
+    b = sum((x - mx) * (y - my) for x, y in zip(xs, ys)) / sxx
+    a = my - b * mx
+    if n <= 2:
+        return a, b, 0.0
+    resid = sum((y - (a + b * x)) ** 2 for x, y in zip(xs, ys))
+    return a, b, math.sqrt(resid / (n - 2))
+
+
+def growth_rows(case):
+    """Five quantiles per trophy from the history's growth.
+
+    For each trophy, logit(rate) is fitted as a straight line in
+    log(1 + hours since release) over the last FIT_WINDOW_HOURS of reads
+    (all reads if fewer than three fall in the window) and read at the
+    target. The logit scale is what keeps a 4.5-day extrapolation honest:
+    it compresses growth, so a rate cannot run away the way a power law
+    on earners can. The logit's move from the last observed rate is
+    capped. The spread combines the fit's residual scatter with a
+    horizon term that grows like the square root of the horizon in days.
     """
     trophies = case["trophies"]
     history = case["history"]
     target = parse_time(case["target"])
-    t_target = hours_since_release(target)
+    x_target = math.log1p(max(0.0, hours_since_release(target)))
     horizon_days = case["horizon_minutes"] / 1440.0
-    x_target = math.log1p(max(0.0, t_target))
-
     t_last = hours_since_release(parse_time(history[-1]["at"]))
-    medians, sigmas = [], []
-    for i in range(len(trophies)):
+
+    rows = []
+    for i, trophy in enumerate(trophies):
+        # The trophy's last observed rate, scanning the history backwards.
         last_rate = None
         for read in reversed(history):
-            if i < len(read["rates"]) and read["rates"][i] is not None:
-                last_rate = read["rates"][i]
+            rates = read["rates"]
+            if i < len(rates) and rates[i] is not None:
+                last_rate = rates[i]
                 break
         if last_rate is None:
-            medians.append(0.5)
-            sigmas.append(SIGMA_CAP)
+            rows.append({"id": trophy["id"],
+                         "q": tidy([inv_logit(z * SIGMA_CAP) for z in Z])})
             continue
-        xs, ys = [], []
-        for read in history:
-            rates = read["rates"]
-            if i >= len(rates) or rates[i] is None:
-                continue
-            t = hours_since_release(parse_time(read["at"]))
-            if t_last - t <= FIT_WINDOW_HOURS:
-                xs.append(math.log1p(max(0.0, t)))
-                ys.append(logit(rates[i]))
-        if len(xs) < 3:
-            xs, ys = [], []
+
+        # (x, y) points: log-hours against logit(rate), recent window.
+        def series(window):
+            pts = []
             for read in history:
                 rates = read["rates"]
                 if i >= len(rates) or rates[i] is None:
                     continue
                 t = hours_since_release(parse_time(read["at"]))
-                xs.append(math.log1p(max(0.0, t)))
-                ys.append(logit(rates[i]))
-        if not xs:
-            medians.append(last_rate)
-            sigmas.append(SIGMA_CAP)
+                if window is None or t_last - t <= window:
+                    pts.append((math.log1p(max(0.0, t)), logit(rates[i])))
+            return pts
+
+        pts = series(FIT_WINDOW_HOURS)
+        if len(pts) < 3:
+            pts = series(None)
+        if not pts:
+            rows.append({"id": trophy["id"],
+                         "q": tidy([inv_logit(logit(last_rate) + z * SIGMA_CAP)
+                                    for z in Z])})
             continue
-        a, b, resid = _fit_log_log(xs, ys)
+        xs = [p[0] for p in pts]
+        ys = [p[1] for p in pts]
+        a, b, resid = _linfit(xs, ys)
         lg = a + b * x_target
         lg_last = logit(last_rate)
-        if lg > lg_last + LOGIT_CAP:
-            lg = lg_last + LOGIT_CAP
-        elif lg < lg_last - LOGIT_CAP:
-            lg = lg_last - LOGIT_CAP
-        median = inv_logit(lg)
+        lg = min(lg_last + LOGIT_CAP, max(lg_last - LOGIT_CAP, lg))
         sigma = math.sqrt(resid * resid +
                           (SIGMA_HORIZON * math.sqrt(horizon_days)) ** 2)
         sigma = min(SIGMA_CAP, max(SIGMA_FLOOR, sigma))
-        medians.append(median)
-        sigmas.append(sigma)
-    return medians, sigmas
+        rows.append({"id": trophy["id"],
+                     "q": tidy([inv_logit(lg + z * sigma) for z in Z])})
+    return rows
 
 
 def history_is_flat(case):
@@ -375,25 +432,12 @@ def forecast_case(case):
     age_hours = hours_since_release(checkpoint)
 
     if history_is_flat(case) and age_hours <= FLAT_MAX_AGE_HOURS:
-        # Flat launch night: the posterior quantiles over the refresh
-        # scenarios carry the whole forecast, medians and spread together.
-        return {"trophies": flat_posterior_rows(
+        # Flat launch night: the hedge of the two flat views.
+        return {"trophies": flat_hedge_rows(
             trophies, rates, last["players_tracked"],
             last["trophies_earned"])}
 
-    medians, sigmas = growth_medians_and_sigmas(case)
-
-    rows = []
-    for trophy, median, sigma in zip(trophies, medians, sigmas):
-        lg = logit(median)
-        qs = [round4(inv_logit(lg + z * sigma)) for z in Z]
-        # Rounding must not break the ordering.
-        for k in range(1, 5):
-            if qs[k] < qs[k - 1]:
-                qs[k] = qs[k - 1]
-        qs = [min(100.0, max(0.0, q)) for q in qs]
-        rows.append({"id": trophy["id"], "q": qs})
-    return {"trophies": rows}
+    return {"trophies": growth_rows(case)}
 
 
 def main():
